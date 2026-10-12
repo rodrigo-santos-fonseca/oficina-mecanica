@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>OficinaGest | Gestão de oficina mecânica</title>
+  <meta name="description" content="Sistema web para gestão integrada de clientes, veículos, serviços e peças em oficinas mecânicas.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=Public+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <a class="skip" href="#view">Ir para o conteúdo</a>
+  <div class="shell">
+    <aside class="side">
+      <a class="brand" href="#/painel" aria-label="OficinaGest, ir para o painel">
+        <svg width="26" height="26" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M14.7 6.3a4 4 0 0 0-5.4 5.1L3 17.7 6.3 21l6.3-6.3a4 4 0 0 0 5.1-5.4l-2.6 2.6-2.4-.6-.6-2.4 2.6-2.6Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>
+        <span>OficinaGest</span>
+      </a>
+      <nav class="nav" aria-label="Principal">
+        <a href="#/painel" data-page="painel">Painel</a>
+        <a href="#/os" data-page="os">Ordens de serviço</a>
+        <a href="#/clientes" data-page="clientes">Clientes</a>
+        <a href="#/veiculos" data-page="veiculos">Veículos</a>
+        <a href="#/servicos" data-page="servicos">Serviços</a>
+        <a href="#/pecas" data-page="pecas">Peças e estoque</a>
+      </nav>
+      <div class="side-foot">
+        <p>Protótipo acadêmico. Os dados ficam salvos neste navegador.</p>
+        <button type="button" class="link-light" data-act="restaurar">Restaurar dados de exemplo</button>
+      </div>
+    </aside>
+    <main id="view" class="main" tabindex="-1"></main>
+  </div>
+  <div id="modal-root"></div>
+  <div id="toast" role="status" aria-live="polite"></div>
+  <script src="js/db.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
