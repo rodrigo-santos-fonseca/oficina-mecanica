@@ -21,18 +21,22 @@
       <nav class="nav" aria-label="Principal">
         <a href="#/painel" data-page="painel">Painel</a>
         <a href="#/os" data-page="os">Ordens de serviço</a>
+        <a href="#/orcamentos" data-page="orcamentos">Orçamentos</a>
         <a href="#/clientes" data-page="clientes">Clientes</a>
         <a href="#/veiculos" data-page="veiculos">Veículos</a>
         <a href="#/servicos" data-page="servicos">Serviços</a>
-        <a href="#/pecas" data-page="pecas">Peças e estoque</a>
+        <a href="#/pecas" data-page="pecas">Peças</a>
+        <a href="#/usuarios" data-page="usuarios">Usuários</a>
       </nav>
       <div class="side-foot">
+        <div id="user-box" class="user-box"></div>
         <p>Protótipo acadêmico. Os dados ficam salvos neste navegador.</p>
-        <button type="button" class="link-light" data-act="restaurar">Restaurar dados de exemplo</button>
+        <button type="button" id="btn-restaurar" class="link-light" data-act="restaurar">Restaurar dados de exemplo</button>
       </div>
     </aside>
     <main id="view" class="main" tabindex="-1"></main>
   </div>
+  <div id="login-root"></div>
   <div id="modal-root"></div>
   <div id="toast" role="status" aria-live="polite"></div>
   <script src="js/db.js"></script>
