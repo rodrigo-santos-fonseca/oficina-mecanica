@@ -183,15 +183,26 @@ tbody tr:hover { background: #f7f9fa; }
   .nav { flex-direction: row; overflow-x: auto; }
   .nav a { white-space: nowrap; padding: 11px 16px; border-left: 0; border-bottom: 4px solid transparent; }
   .nav a[aria-current="page"] { border-bottom-color: var(--signal); }
-  .side-foot { display: none; }
+  .side { position: relative; }
+  .side-foot { display: block; position: absolute; top: 10px; right: 12px; margin: 0; padding: 0; border: 0; }
+  .side-foot p, #btn-restaurar { display: none !important; }
+  .side .user-box { display: flex; align-items: center; gap: 10px; margin: 0; }
+  .user-box strong { max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+  .user-box span { display: none; }
+  .user-box strong { display: none; }
+  .user-box .link-light { padding: 0 14px; min-height: 40px; border: 1px solid #55636d; border-radius: var(--radius); text-decoration: none; font-size: 14px; color: #fff; }
   .main { padding: 20px 16px 48px; }
   h1 { font-size: 30px; }
-  .strip { grid-template-columns: 1fr 1fr; }
+  .strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .strip > div { padding: 12px 14px; min-width: 0; }
+  .strip dd { font-size: clamp(16px, 4.8vw, 22px); overflow-wrap: anywhere; }
   .ticket { padding: 18px; }
   .ticket-fields, .modal .grid { grid-template-columns: 1fr; }
   .stepper { flex-wrap: wrap; }
   .stepper li { flex: 1 1 33%; }
 }
+
+@media (min-width: 601px) and (max-width: 900px) { .user-box strong { display: block; } }
 
 @media print {
   body { background: #fff; }
