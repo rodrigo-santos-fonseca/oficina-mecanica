@@ -1,0 +1,13 @@
+{
+  "name": "oficinagest",
+  "version": "2.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Sistema web de gestão para oficina mecânica (Supabase + Vercel)",
+  "dependencies": {
+    "@supabase/supabase-js": "2.45.4"
+  },
+  "engines": {
+    "node": "20.x"
+  }
+}

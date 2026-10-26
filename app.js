@@ -1,5 +1,397 @@
 'use strict';
 
+/* =====================================================================
+   OficinaGest | app.js
+   Todo o código do site está neste arquivo, em três partes:
+     1. CONFIGURAÇÃO   dados de ligação com o Supabase
+     2. DADOS          leitura e gravação no banco (Supabase) e login
+     3. TELAS          menus, formulários, permissões e eventos
+   ===================================================================== */
+
+/* ---------------------------------------------------------------------
+   1. CONFIGURAÇÃO
+   Cole aqui os dois valores de: Supabase > Project Settings > API
+     - Project URL
+     - Project API keys > "anon" "public"
+   A chave "anon" é PÚBLICA por definição: quem protege os dados são as
+   regras de segurança do banco (RLS). NUNCA coloque aqui a chave
+   "service_role".
+   --------------------------------------------------------------------- */
+const CONFIG = {
+  SUPABASE_URL: 'https://ievuofndzkkqdrddavfw.supabase.co',
+  SUPABASE_ANON_KEY: 'sb_publishable_s1o3lczUAdP65ZSLWPnDYw_0ehNJomi'
+};
+
+/* ---------------------------------------------------------------------
+   2. DADOS (Supabase)
+   - Leituras: os dados são carregados uma vez após o login e ficam em
+     memória (cache); as telas leem com DB.list / DB.get.
+   - Escritas: sempre vão ao banco (funções assíncronas que devolvem
+     { ok, erro }) e o cache é atualizado em seguida.
+   - As regras de negócio e a segurança ficam NO BANCO
+     (supabase/01_schema.sql); aqui só traduzimos as mensagens de erro.
+   - O painel recebe atualizações em tempo real (Supabase Realtime).
+   --------------------------------------------------------------------- */
+const DB = (() => {
+  const cfg = CONFIG;
+  const configurado = Boolean(cfg.SUPABASE_URL && cfg.SUPABASE_ANON_KEY)
+    && !/SEU-PROJETO|COLE_AQUI/.test(cfg.SUPABASE_URL + cfg.SUPABASE_ANON_KEY);
+
+  let sb = null;
+  if (configurado && window.supabase) {
+    let armazenamento;
+    try { armazenamento = window.sessionStorage; } catch (e) { armazenamento = undefined; }
+    sb = window.supabase.createClient(cfg.SUPABASE_URL, cfg.SUPABASE_ANON_KEY, {
+      auth: { storage: armazenamento, persistSession: true, autoRefreshToken: true, detectSessionInUrl: false }
+    });
+  }
+
+  const STATUS = [
+    { key: 'pendente', label: 'Pendente' },
+    { key: 'em_andamento', label: 'Em andamento' },
+    { key: 'aguardando_peca', label: 'Aguardando peça' },
+    { key: 'concluida', label: 'Concluída' },
+    { key: 'cancelada', label: 'Cancelada' }
+  ];
+  const ORC_STATUS = [
+    { key: 'em_elaboracao', label: 'Em elaboração' },
+    { key: 'aguardando_aprovacao', label: 'Aguardando aprovação' },
+    { key: 'aprovado', label: 'Aprovado' },
+    { key: 'recusado', label: 'Recusado' },
+    { key: 'convertido', label: 'Convertido em OS' }
+  ];
+  const PERFIS = [
+    { key: 'administrador', label: 'Administrador' },
+    { key: 'atendente', label: 'Atendente' },
+    { key: 'mecanico', label: 'Mecânico' }
+  ];
+  const CATEGORIAS = ['Mecânica geral', 'Elétrica', 'Freios e suspensão', 'Revisão preventiva', 'Pneus e alinhamento'];
+  const FORMAS_PAGAMENTO = ['Dinheiro', 'Pix', 'Cartão de débito', 'Cartão de crédito', 'Boleto'];
+  const TRAVADAS = ['concluida', 'cancelada'];
+
+  /* Nome da tabela no banco para cada coleção usada pelas telas */
+  const TABELA = { usuarios: 'usuarios', clientes: 'clientes', veiculos: 'veiculos', servicos: 'servicos', pecas: 'pecas', ordens: 'ordens_servico', orcamentos: 'orcamentos' };
+  /* Colunas que cada coleção aceita gravar (o resto é ignorado) */
+  const COLUNAS = {
+    clientes: ['nome', 'cpf_cnpj', 'telefone', 'email', 'endereco', 'ativo'],
+    veiculos: ['cliente_id', 'placa', 'chassi', 'marca', 'modelo', 'ano', 'cor', 'km'],
+    servicos: ['descricao', 'categoria', 'valor_padrao'],
+    pecas: ['codigo', 'descricao', 'preco_custo', 'preco_venda', 'disponivel'],
+    ordens: ['defeito_relatado', 'mecanico_id', 'previsao_entrega', 'garantia_dias', 'desconto', 'observacoes'],
+    orcamentos: ['descricao', 'validade_dias', 'prazo_dias', 'desconto', 'observacoes'],
+    usuarios: ['nome', 'perfil', 'ativo']
+  };
+
+  const pad = n => String(n).padStart(2, '0');
+  const localISO = d => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  const today = () => localISO(new Date());
+  const addDays = (iso, n) => {
+    const d = new Date(iso + 'T12:00:00');
+    d.setDate(d.getDate() + n);
+    return localISO(d);
+  };
+  const dataLocal = ts => (ts ? localISO(new Date(ts)) : null);
+  const horaLocal = ts => { if (!ts) return null; const d = new Date(ts); return `${pad(d.getHours())}:${pad(d.getMinutes())}`; };
+  const txt = v => (v === null || v === undefined ? '' : v);
+
+  let data = { usuarios: [], clientes: [], veiculos: [], servicos: [], pecas: [], ordens: [], orcamentos: [] };
+  const list = t => data[t].slice();
+  const get = (t, id) => data[t].find(r => String(r.id) === String(id));
+  const nomeUsuario = id => { const u = id ? get('usuarios', id) : null; return u ? u.nome : ''; };
+
+  /* ---------- Erros ---------- */
+  function traduzErro(e) {
+    if (!e) return 'Erro desconhecido.';
+    const msg = String(e.message || e);
+    const code = e.code;
+    if (/Failed to fetch|NetworkError|Load failed|fetch failed/i.test(msg)) return 'Sem conexão com o servidor. Verifique a internet e tente de novo.';
+    if (code === 'P0001') return msg; /* mensagens das regras do banco, já em português */
+    if (code === '23505') {
+      if (/placa/.test(msg)) return 'Já existe um veículo com esta placa.';
+      if (/chassi/.test(msg)) return 'Já existe um veículo com este chassi.';
+      if (/clientes_doc/.test(msg)) return 'Já existe um cliente com este CPF/CNPJ.';
+      if (/pecas_codigo/.test(msg)) return 'Já existe uma peça com este código.';
+      if (/servicos_descricao/.test(msg)) return 'Já existe um serviço com esta descrição.';
+      return 'Já existe um registro com estes dados.';
+    }
+    if (code === '23503') {
+      const t = (msg.match(/on table "(\w+)"/) || [])[1];
+      if (t === 'clientes') return 'Este cliente possui veículos, ordens de serviço ou orçamentos no histórico. Inative o cadastro em vez de excluir.';
+      if (t === 'veiculos') return 'Este veículo possui ordens de serviço ou orçamentos no histórico.';
+      if (t === 'pecas') return 'Esta peça está registrada em ordens de serviço ou orçamentos. Marque como indisponível em vez de excluir.';
+      return 'Este registro está em uso e não pode ser excluído.';
+    }
+    if (code === '23502') return 'Preencha todos os campos obrigatórios.';
+    if (code === '23514') return 'Algum valor informado não é válido.';
+    if (code === '42501' || /row-level security|permission denied/i.test(msg)) return 'Seu perfil não tem permissão para esta ação.';
+    if (/JWT expired|invalid.*jwt/i.test(msg)) return 'Sua sessão expirou. Entre novamente.';
+    return msg;
+  }
+
+  /* Executa uma operação e, se der certo, atualiza o cache das coleções indicadas.
+     exigeLinhas: UPDATE/DELETE bloqueado pela segurança não dá erro, só afeta 0 linhas. */
+  async function exec(operacao, recarregar, exigeLinhas = false) {
+    let resposta;
+    try { resposta = await operacao; } catch (e) { return { ok: false, erro: traduzErro(e) }; }
+    const { data: dados, error } = resposta;
+    if (error) return { ok: false, erro: traduzErro(error) };
+    if (exigeLinhas && Array.isArray(dados) && dados.length === 0) {
+      return { ok: false, erro: 'Não foi possível concluir: o registro não existe mais ou seu perfil não tem permissão.' };
+    }
+    if (recarregar) { try { await carregar(recarregar); } catch (e) { /* o dado foi gravado; o cache se atualiza no próximo evento */ } }
+    return { ok: true, dados };
+  }
+
+  const paraBanco = (colecao, obj) => {
+    const saida = {};
+    (COLUNAS[colecao] || []).forEach(c => {
+      if (!(c in obj)) return;
+      const v = obj[c];
+      saida[c] = v === '' ? null : v;
+    });
+    return saida;
+  };
+
+  /* ---------- Leitura ---------- */
+  async function todos(tabela) {
+    const saida = [];
+    const passo = 1000; /* limite de linhas por consulta do Supabase */
+    for (let ini = 0; ; ini += passo) {
+      const { data: lote, error } = await sb.from(tabela).select('*').order('id').range(ini, ini + passo - 1);
+      if (error) throw error;
+      saida.push(...lote);
+      if (lote.length < passo) break;
+    }
+    return saida;
+  }
+
+  const agrupar = (linhas, chave) => {
+    const m = new Map();
+    linhas.forEach(l => { if (!m.has(l[chave])) m.set(l[chave], []); m.get(l[chave]).push(l); });
+    return m;
+  };
+
+  const normServico = i => ({ id: i.id, servico_id: i.servico_id, descricao: i.descricao, valor: Number(i.valor) });
+  const normPeca = i => ({ id: i.id, peca_id: i.peca_id, codigo: i.codigo, descricao: i.descricao, quantidade: i.quantidade, preco_unit: Number(i.preco_unit), encomenda: Boolean(i.encomenda), recebida: Boolean(i.recebida) });
+
+  function normOS(o, servicos, pecas) {
+    return {
+      id: o.id, cliente_id: o.cliente_id, veiculo_id: o.veiculo_id, status: o.status,
+      defeito_relatado: o.defeito_relatado, observacoes: txt(o.observacoes),
+      mecanico_id: o.mecanico_id, mecanico: nomeUsuario(o.mecanico_id),
+      aberta_por_id: o.aberta_por, aberta_por: nomeUsuario(o.aberta_por),
+      data_abertura: dataLocal(o.aberta_em), hora_abertura: horaLocal(o.aberta_em),
+      previsao_entrega: txt(o.previsao_entrega),
+      data_conclusao: dataLocal(o.concluida_em), hora_conclusao: horaLocal(o.concluida_em),
+      garantia_dias: o.garantia_dias, desconto: Number(o.desconto),
+      forma_pagamento: o.forma_pagamento, pago_em: o.pago_em,
+      itens_servico: (servicos.get(o.id) || []).map(normServico),
+      itens_peca: (pecas.get(o.id) || []).map(normPeca)
+    };
+  }
+
+  function normOrc(o, servicos, pecas) {
+    return {
+      id: o.id, cliente_id: o.cliente_id, veiculo_id: o.veiculo_id, status: o.status,
+      descricao: o.descricao, observacoes: txt(o.observacoes),
+      criado_por_id: o.criado_por, criado_por: nomeUsuario(o.criado_por),
+      data_emissao: o.data_emissao, validade_dias: o.validade_dias, prazo_dias: o.prazo_dias,
+      desconto: Number(o.desconto), os_id: o.os_id,
+      itens_servico: (servicos.get(o.id) || []).map(normServico),
+      itens_peca: (pecas.get(o.id) || []).map(normPeca)
+    };
+  }
+
+  const TODAS = ['usuarios', 'clientes', 'veiculos', 'servicos', 'pecas', 'ordens', 'orcamentos'];
+
+  async function carregar(quais = TODAS) {
+    const q = new Set(quais);
+    /* ordens e orçamentos usam o nome dos usuários, então estes entram junto */
+    if ((q.has('ordens') || q.has('orcamentos')) && !q.has('usuarios')) q.add('usuarios');
+    const r = {};
+    const tarefas = [];
+    const buscar = (chave, tabela) => tarefas.push(todos(tabela).then(v => { r[chave] = v; }));
+    if (q.has('usuarios')) buscar('usuarios', 'usuarios');
+    if (q.has('clientes')) buscar('clientes', 'clientes');
+    if (q.has('veiculos')) buscar('veiculos', 'veiculos');
+    if (q.has('servicos')) buscar('servicos', 'servicos');
+    if (q.has('pecas')) buscar('pecas', 'pecas');
+    if (q.has('ordens')) { buscar('ordens', 'ordens_servico'); buscar('os_servicos', 'os_servicos'); buscar('os_pecas', 'os_pecas'); }
+    if (q.has('orcamentos')) { buscar('orcamentos', 'orcamentos'); buscar('orc_servicos', 'orcamento_servicos'); buscar('orc_pecas', 'orcamento_pecas'); }
+    await Promise.all(tarefas);
+
+    if (r.usuarios) data.usuarios = r.usuarios.map(u => ({ id: u.id, email: u.email, nome: u.nome, perfil: u.perfil, ativo: u.ativo }));
+    if (r.clientes) data.clientes = r.clientes.map(c => ({ ...c, email: txt(c.email), endereco: txt(c.endereco) }));
+    if (r.veiculos) data.veiculos = r.veiculos.map(v => ({ ...v, chassi: txt(v.chassi), cor: txt(v.cor), km: Number(v.km) }));
+    if (r.servicos) data.servicos = r.servicos.map(s => ({ ...s, valor_padrao: Number(s.valor_padrao) }));
+    if (r.pecas) data.pecas = r.pecas.map(p => ({ ...p, preco_custo: Number(p.preco_custo), preco_venda: Number(p.preco_venda) }));
+    if (r.ordens) {
+      const s = agrupar(r.os_servicos, 'os_id'), p = agrupar(r.os_pecas, 'os_id');
+      data.ordens = r.ordens.map(o => normOS(o, s, p));
+    }
+    if (r.orcamentos) {
+      const s = agrupar(r.orc_servicos, 'orcamento_id'), p = agrupar(r.orc_pecas, 'orcamento_id');
+      data.orcamentos = r.orcamentos.map(o => normOrc(o, s, p));
+    }
+    /* se só os usuários mudaram, os nomes exibidos nas OS e orçamentos precisam acompanhar */
+    if (r.usuarios && !r.ordens) data.ordens.forEach(o => { o.mecanico = nomeUsuario(o.mecanico_id); o.aberta_por = nomeUsuario(o.aberta_por_id); });
+    if (r.usuarios && !r.orcamentos) data.orcamentos.forEach(o => { o.criado_por = nomeUsuario(o.criado_por_id); });
+  }
+
+  /* ---------- Login ---------- */
+  async function perfilDe(uid) {
+    const { data: u, error } = await sb.from('usuarios').select('id,email,nome,perfil,ativo').eq('id', uid).maybeSingle();
+    if (error) throw error;
+    return u;
+  }
+
+  async function sessaoDoSupabase() {
+    const { data: s } = await sb.auth.getSession();
+    if (!s || !s.session) return { ok: false };
+    let u;
+    try { u = await perfilDe(s.session.user.id); } catch (e) { return { ok: false, erro: traduzErro(e) }; }
+    if (!u || !u.ativo) {
+      await sb.auth.signOut();
+      return { ok: false, erro: 'Seu acesso ainda não foi liberado por um administrador, ou foi desativado.' };
+    }
+    return { ok: true, sessao: { id: u.id, nome: u.nome, perfil: u.perfil, email: u.email } };
+  }
+
+  async function entrar(email, senha) {
+    let r;
+    try { r = await sb.auth.signInWithPassword({ email: String(email).trim().toLowerCase(), password: senha }); }
+    catch (e) { return { ok: false, erro: traduzErro(e) }; }
+    if (r.error) {
+      return { ok: false, erro: /Invalid login|invalid_credentials/i.test(r.error.message + (r.error.code || '')) ? 'E-mail ou senha incorretos.' : traduzErro(r.error) };
+    }
+    return sessaoDoSupabase();
+  }
+
+  async function sair() {
+    desassinar();
+    try { await sb.auth.signOut(); } catch (e) { /* ignora */ }
+    data = { usuarios: [], clientes: [], veiculos: [], servicos: [], pecas: [], ordens: [], orcamentos: [] };
+  }
+
+  /* ---------- Tempo real ---------- */
+  let canal = null;
+  function desassinar() {
+    if (canal && sb) { try { sb.removeChannel(canal); } catch (e) { /* ignora */ } }
+    canal = null;
+  }
+  function assinar(aoMudar) {
+    desassinar();
+    try {
+      canal = sb.channel('oficinagest-mudancas');
+      ['usuarios', 'clientes', 'veiculos', 'servicos', 'pecas', 'ordens_servico', 'os_servicos', 'os_pecas', 'orcamentos', 'orcamento_servicos', 'orcamento_pecas']
+        .forEach(tabela => canal.on('postgres_changes', { event: '*', schema: 'public', table: tabela }, aoMudar));
+      canal.subscribe();
+    } catch (e) { canal = null; /* sem tempo real o sistema continua funcionando */ }
+  }
+
+  /* ---------- Cadastros simples (clientes, veículos, serviços, peças) ---------- */
+  const insert = (colecao, obj) => exec(sb.from(TABELA[colecao]).insert(paraBanco(colecao, obj)).select().single(), [colecao]);
+  const update = (colecao, id, patch) => exec(sb.from(TABELA[colecao]).update(paraBanco(colecao, patch)).eq('id', id).select(), colecao === 'ordens' ? ['ordens'] : [colecao], true);
+  const remove = (colecao, id) => exec(sb.from(TABELA[colecao]).delete().eq('id', id).select(), colecao === 'ordens' ? ['ordens', 'orcamentos'] : [colecao], true);
+
+  /* ---------- Ordem de serviço ---------- */
+  const novaOS = async d => {
+    const r = await exec(sb.from('ordens_servico').insert({
+      cliente_id: d.cliente_id, veiculo_id: d.veiculo_id, defeito_relatado: d.defeito_relatado,
+      mecanico_id: d.mecanico_id || null, previsao_entrega: d.previsao_entrega
+    }).select().single(), ['ordens']);
+    return r.ok ? { ok: true, os: { id: r.dados.id } } : r;
+  };
+  const mudarStatus = (id, novo) => exec(sb.from('ordens_servico').update({ status: novo }).eq('id', id).select(), ['ordens'], true);
+  const registrarPagamento = (id, forma, dataPagamento) => exec(sb.from('ordens_servico').update({ forma_pagamento: forma || null, pago_em: dataPagamento || null }).eq('id', id).select(), ['ordens'], true);
+  const estornarPagamento = id => exec(sb.from('ordens_servico').update({ forma_pagamento: null, pago_em: null }).eq('id', id).select(), ['ordens'], true);
+  const receberPeca = (osId, itemId) => exec(sb.from('os_pecas').update({ recebida: true }).eq('id', itemId).select(), ['ordens'], true);
+
+  /* ---------- Itens (valem para OS e orçamento) ---------- */
+  const ITENS = {
+    ordens: { servicos: 'os_servicos', pecas: 'os_pecas', fk: 'os_id' },
+    orcamentos: { servicos: 'orcamento_servicos', pecas: 'orcamento_pecas', fk: 'orcamento_id' }
+  };
+
+  const addServico = (t, id, { servico_id, descricao, valor }) => exec(sb.from(ITENS[t].servicos).insert({
+    [ITENS[t].fk]: id, servico_id: servico_id || null, descricao, valor: Number(valor)
+  }), [t]);
+
+  const addPeca = (t, id, pecaId, quantidade, encomendar = false) => {
+    const qtd = Number(quantidade);
+    if (!Number.isInteger(qtd) || qtd < 1) return Promise.resolve({ ok: false, erro: 'Informe uma quantidade inteira maior que zero.' });
+    return t === 'ordens'
+      ? exec(sb.rpc('adicionar_peca_os', { p_os: id, p_peca: Number(pecaId), p_qtd: qtd, p_encomendar: Boolean(encomendar) }), [t])
+      : exec(sb.rpc('adicionar_peca_orcamento', { p_orcamento: id, p_peca: Number(pecaId), p_qtd: qtd }), [t]);
+  };
+
+  const removeItem = (t, id, tipo, itemId) =>
+    exec(sb.from(tipo === 'servico' ? ITENS[t].servicos : ITENS[t].pecas).delete().eq('id', itemId).select(), [t], true);
+
+  /* ---------- Orçamento ---------- */
+  const novoOrcamento = async d => {
+    const r = await exec(sb.from('orcamentos').insert({
+      cliente_id: d.cliente_id, veiculo_id: d.veiculo_id, descricao: d.descricao,
+      validade_dias: d.validade_dias, prazo_dias: d.prazo_dias
+    }).select().single(), ['orcamentos']);
+    return r.ok ? { ok: true, orcamento: { id: r.dados.id } } : r;
+  };
+  const mudarStatusOrc = (id, novo) => exec(sb.from('orcamentos').update({ status: novo }).eq('id', id).select(), ['orcamentos'], true);
+  const converterOrcamento = async id => {
+    const r = await exec(sb.rpc('converter_orcamento', { p_id: id }), ['ordens', 'orcamentos']);
+    return r.ok ? { ok: true, os: get('ordens', r.dados) || { id: r.dados } } : r;
+  };
+
+  /* ---------- Usuários ---------- */
+  async function chamarApi(corpo) {
+    let resposta, json = {};
+    try {
+      const { data: s } = await sb.auth.getSession();
+      resposta = await fetch('/api/usuarios', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + (s && s.session ? s.session.access_token : '') },
+        body: JSON.stringify(corpo)
+      });
+      json = await resposta.json().catch(() => ({}));
+    } catch (e) { return { ok: false, erro: traduzErro(e) }; }
+    if (!resposta.ok) {
+      return { ok: false, erro: json.erro || (resposta.status === 404 ? 'A função de usuários não está publicada neste endereço (ela existe só na Vercel).' : 'Falha ao falar com o servidor.') };
+    }
+    return { ok: true };
+  }
+
+  async function salvarUsuario(id, d) {
+    if (!id) {
+      const r = await chamarApi({ acao: 'criar', email: d.email, nome: d.nome, perfil: d.perfil, senha: d.senha });
+      if (r.ok) await carregar(['usuarios']);
+      return r;
+    }
+    const r = await exec(sb.from('usuarios').update(paraBanco('usuarios', d)).eq('id', id).select(), ['usuarios'], true);
+    if (r.ok && d.senha) return chamarApi({ acao: 'senha', id, senha: d.senha });
+    return r;
+  }
+
+  /* ---------- Cálculos usados pelas telas ---------- */
+  function totais(o) {
+    const servicos = o.itens_servico.reduce((a, i) => a + Number(i.valor), 0);
+    const pecas = o.itens_peca.reduce((a, i) => a + i.quantidade * i.preco_unit, 0);
+    const desconto = Math.min(Number(o.desconto) || 0, servicos + pecas);
+    return { servicos, pecas, desconto, total: servicos + pecas - desconto };
+  }
+  const pendentes = o => o.itens_peca.filter(i => i.encomenda && !i.recebida);
+
+  return {
+    configurado, STATUS, ORC_STATUS, PERFIS, CATEGORIAS, FORMAS_PAGAMENTO, TRAVADAS,
+    list, get, nomeUsuario, carregar, entrar, sair, sessaoDoSupabase, assinar,
+    insert, update, remove, novaOS, mudarStatus, registrarPagamento, estornarPagamento, receberPeca,
+    addServico, addPeca, removeItem, novoOrcamento, mudarStatusOrc, converterOrcamento, salvarUsuario,
+    totais, pendentes, today, addDays
+  };
+})();
+
+/* ---------------------------------------------------------------------
+   3. TELAS
+   --------------------------------------------------------------------- */
 /* ---------- Utilidades ---------- */
 const $ = (s, r = document) => r.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -71,29 +463,19 @@ function toast(msg, erro = false) {
 const TODOS_STATUS = STATUS.map(x => x.key);
 /* Ajuste aqui o que cada perfil pode fazer. */
 const PERMS = {
-  administrador: { paginas: ['painel', 'os', 'orcamentos', 'clientes', 'veiculos', 'servicos', 'pecas', 'usuarios'], editar: ['clientes', 'veiculos', 'servicos', 'pecas', 'usuarios'], orcamentos: true, novaOS: true, excluirOS: true, desconto: true, atribuir: true, financeiro: true, status: TODOS_STATUS, valores: true, receber: true, restaurar: true },
-  atendente: { paginas: ['painel', 'os', 'orcamentos', 'clientes', 'veiculos', 'pecas'], editar: ['clientes', 'veiculos', 'pecas'], orcamentos: true, novaOS: true, excluirOS: false, desconto: true, atribuir: true, financeiro: false, valores: true, receber: true, status: TODOS_STATUS, restaurar: false },
-  mecanico: { paginas: ['painel', 'os', 'pecas'], editar: [], orcamentos: false, novaOS: false, excluirOS: false, desconto: false, atribuir: false, financeiro: false, valores: false, receber: false, status: ['pendente', 'em_andamento', 'aguardando_peca', 'concluida'], restaurar: false }
+  administrador: { paginas: ['painel', 'os', 'orcamentos', 'clientes', 'veiculos', 'servicos', 'pecas', 'usuarios'], editar: ['clientes', 'veiculos', 'servicos', 'pecas', 'usuarios'], orcamentos: true, novaOS: true, excluirOS: true, desconto: true, atribuir: true, financeiro: true, status: TODOS_STATUS, valores: true, receber: true },
+  atendente: { paginas: ['painel', 'os', 'orcamentos', 'clientes', 'veiculos', 'pecas'], editar: ['clientes', 'veiculos', 'pecas'], orcamentos: true, novaOS: true, excluirOS: false, desconto: true, atribuir: true, financeiro: false, valores: true, receber: true, status: TODOS_STATUS },
+  mecanico: { paginas: ['painel', 'os', 'pecas'], editar: [], orcamentos: false, novaOS: false, excluirOS: false, desconto: false, atribuir: false, financeiro: false, valores: false, receber: false, status: ['pendente', 'em_andamento', 'aguardando_peca', 'concluida'] }
 };
-const SESSAO_KEY = 'oficinagest.sessao';
 const IDLE_MS = 30 * 60 * 1000; /* encerra a sessão após 30 minutos sem uso */
 let sessao = null;
 let idleTimer = null;
+let ocupado = false; /* evita cliques repetidos enquanto uma gravação está em andamento */
 const perm = () => PERMS[sessao.perfil];
 const pode = t => perm().editar.includes(t);
 const perfilLabel = k => rotulo(DB.PERFIS, k);
-
-function lerSessao() {
-  try {
-    const id = sessionStorage.getItem(SESSAO_KEY);
-    const u = id && DB.get('usuarios', id);
-    if (u && u.ativo) return { id: u.id, nome: u.nome, perfil: u.perfil };
-  } catch (e) { /* sem sessionStorage */ }
-  return null;
-}
-function gravarSessao(u) {
-  try { if (u) sessionStorage.setItem(SESSAO_KEY, u.id); else sessionStorage.removeItem(SESSAO_KEY); } catch (e) { /* ignora */ }
-}
+/* usuários têm id texto (uuid); as demais coleções, número */
+const idDe = (t, v) => (t === 'usuarios' ? String(v) : Number(v));
 
 function reiniciarInatividade() {
   clearTimeout(idleTimer);
@@ -101,42 +483,62 @@ function reiniciarInatividade() {
 }
 ['click', 'keydown', 'mousemove', 'touchstart', 'scroll'].forEach(ev => document.addEventListener(ev, reiniciarInatividade, { passive: true }));
 
+const LOGO = '<svg width="30" height="30" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M14.7 6.3a4 4 0 0 0-5.4 5.1L3 17.7 6.3 21l6.3-6.3a4 4 0 0 0 5.1-5.4l-2.6 2.6-2.4-.6-.6-2.4 2.6-2.6Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>';
+
+function telaConfiguracao() {
+  document.querySelector('.shell').hidden = true;
+  $('#login-root').innerHTML = `<main class="login"><div class="login-card">
+    <div class="login-brand">${LOGO}<span>OficinaGest</span></div>
+    <h1>Falta configurar</h1>
+    <p>O site ainda não está ligado ao banco de dados. Abra o arquivo <code>app.js</code> e preencha, no início dele, a URL e a chave pública (anon) do seu projeto no Supabase. O passo a passo está no arquivo IMPLANTACAO.md.</p>
+    ${window.supabase ? '' : '<p class="form-err">A biblioteca do Supabase não carregou. Verifique a internet e recarregue a página.</p>'}
+  </div></main>`;
+}
+
+function telaCarregando(msg = 'Carregando…') {
+  document.querySelector('.shell').hidden = true;
+  $('#modal-root').innerHTML = '';
+  $('#login-root').innerHTML = `<main class="login"><p class="carregando" role="status">${esc(msg)}</p></main>`;
+}
+
 function telaLogin(msg = '') {
   document.querySelector('.shell').hidden = true;
   document.title = 'Entrar | OficinaGest';
   $('#modal-root').innerHTML = '';
   $('#login-root').innerHTML = `<main class="login"><form class="login-card" id="form-login" novalidate>
-    <div class="login-brand"><svg width="30" height="30" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M14.7 6.3a4 4 0 0 0-5.4 5.1L3 17.7 6.3 21l6.3-6.3a4 4 0 0 0 5.1-5.4l-2.6 2.6-2.4-.6-.6-2.4 2.6-2.6Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg><span>OficinaGest</span></div>
+    <div class="login-brand">${LOGO}<span>OficinaGest</span></div>
     <h1>Entrar</h1>
-    <p class="sub">Use o usuário e a senha fornecidos pelo administrador da oficina.</p>
-    <div class="field"><label for="l_login">Usuário</label><input id="l_login" name="login" autocomplete="username" autocapitalize="none" spellcheck="false"></div>
+    <p class="sub">Use o e-mail e a senha fornecidos pelo administrador da oficina.</p>
+    <div class="field"><label for="l_login">E-mail</label><input id="l_login" name="login" type="email" autocomplete="username" autocapitalize="none" spellcheck="false"></div>
     <div class="field"><label for="l_senha">Senha</label><input id="l_senha" name="senha" type="password" autocomplete="current-password"></div>
     <p class="form-err" id="l_err" role="alert">${esc(msg)}</p>
     <button type="submit" class="btn primary">Entrar</button>
-    <details class="demo"><summary>Contas de demonstração</summary>
-      <table><thead><tr><th>Perfil</th><th>Usuário</th><th>Senha</th></tr></thead><tbody>
-        <tr><td>Administrador</td><td>admin</td><td>admin123</td></tr>
-        <tr><td>Atendente</td><td>atendente</td><td>atendente123</td></tr>
-        <tr><td>Mecânico</td><td>carlos</td><td>mecanico123</td></tr>
-      </tbody></table></details>
   </form></main>`;
-  $('#form-login').addEventListener('submit', e => {
+  $('#form-login').addEventListener('submit', async e => {
     e.preventDefault();
     const f = e.target;
-    if (!f.login.value.trim() || !f.senha.value) return ($('#l_err').textContent = 'Informe o usuário e a senha.');
-    const u = DB.autenticar(f.login.value, f.senha.value);
-    if (!u) { f.senha.value = ''; f.senha.focus(); return ($('#l_err').textContent = 'Usuário ou senha incorretos.'); }
-    gravarSessao(u);
+    const botao = f.querySelector('button[type=submit]');
+    if (!f.login.value.trim() || !f.senha.value) return ($('#l_err').textContent = 'Informe o e-mail e a senha.');
+    botao.disabled = true;
+    $('#l_err').textContent = '';
+    const r = await DB.entrar(f.login.value, f.senha.value);
+    if (!r.ok) {
+      botao.disabled = false;
+      f.senha.value = '';
+      f.senha.focus();
+      return ($('#l_err').textContent = r.erro || 'Não foi possível entrar.');
+    }
+    sessao = r.sessao;
     location.hash = '#/painel';
-    iniciar();
+    await entrarNoSistema();
   });
   $('#l_login').focus();
 }
 
-function sair(msg) {
+async function sair(msg) {
   clearTimeout(idleTimer);
-  gravarSessao(null);
   sessao = null;
+  await DB.sair();
   telaLogin(typeof msg === 'string' ? msg : '');
 }
 
@@ -144,7 +546,6 @@ function atualizarMenu() {
   const pg = perm().paginas;
   document.querySelectorAll('.nav a').forEach(a => { a.hidden = !pg.includes(a.dataset.page); });
   $('#user-box').innerHTML = `<strong>${esc(sessao.nome)}</strong><span>${esc(perfilLabel(sessao.perfil))}</span><button type="button" class="link-light" data-act="sair">Sair</button>`;
-  $('#btn-restaurar').hidden = !perm().restaurar;
 }
 
 /* ---------- Modal e formulários ---------- */
@@ -170,7 +571,7 @@ function fieldHtml(f, val) {
   } else {
     ctl = `<input id="${id}" name="${f.name}" type="${f.type || 'text'}" value="${esc(v)}"` +
       (f.step ? ` step="${f.step}"` : '') + (f.min !== undefined ? ` min="${f.min}"` : '') +
-      (f.maxlength ? ` maxlength="${f.maxlength}"` : '') + ' autocomplete="off">';
+      (f.maxlength ? ` maxlength="${f.maxlength}"` : '') + (f.readonly ? ' readonly' : '') + ' autocomplete="off">';
   }
   return `<div class="field${f.full ? ' col-2' : ''}"><label for="${id}">${esc(f.label)}${f.required ? ' <span class="req" aria-hidden="true">*</span>' : ''}</label>${ctl}${f.hint ? `<small>${esc(f.hint)}</small>` : ''}</div>`;
 }
@@ -185,14 +586,19 @@ function openForm({ title, fields, values = {}, submitLabel = 'Salvar', onSave, 
   </form></div>`;
   const form = $('#modal-root form');
   const showErr = m => { $('#form-err').textContent = m; };
-  form.addEventListener('submit', e => {
+  form.addEventListener('submit', async e => {
     e.preventDefault();
+    const botao = form.querySelector('button[type=submit]');
+    if (botao.disabled) return;
     const vals = {};
     fields.forEach(f => { vals[f.name] = form.elements[f.name].value.trim(); });
     const faltam = fields.filter(f => f.required && vals[f.name] === '').map(f => f.label);
     if (faltam.length) return showErr('Preencha: ' + faltam.join(', ') + '.');
-    const err = onSave(vals);
-    if (err) return showErr(err);
+    showErr('');
+    botao.disabled = true;
+    let err;
+    try { err = await onSave(vals); } catch (ex) { err = 'Algo deu errado. Tente novamente.'; }
+    if (err) { botao.disabled = false; return showErr(err); }
     closeModal();
   });
   if (onChange) form.addEventListener('change', e => onChange(form, e));
@@ -284,24 +690,26 @@ const ENT = {
   },
   usuarios: {
     titulos: { novo: 'Novo usuário', editar: 'Editar usuário', ok: 'Usuário salvo.' },
-    fields: [
+    campos: reg => [
       { name: 'nome', label: 'Nome completo', required: true, full: true },
-      { name: 'login', label: 'Usuário de acesso', required: true, hint: 'Letras minúsculas, números, ponto, hífen ou sublinhado.' },
+      { name: 'email', label: 'E-mail (usado para entrar)', type: 'email', required: true, full: true, readonly: Boolean(reg), hint: reg ? 'O e-mail não pode ser alterado.' : '' },
       { name: 'perfil', label: 'Perfil', type: 'select', required: true, options: DB.PERFIS.map(x => ({ value: x.key, label: x.label })) },
-      { name: 'senha', label: 'Senha', type: 'password', hint: 'Mínimo de 6 caracteres. Ao editar, deixe em branco para manter a senha atual.' },
-      { name: 'ativo', label: 'Situação', type: 'select', required: true, default: 'sim', options: [{ value: 'sim', label: 'Ativo' }, { value: 'nao', label: 'Inativo (sem acesso)' }] }
+      { name: 'ativo', label: 'Situação', type: 'select', required: true, default: 'sim', options: [{ value: 'sim', label: 'Ativo' }, { value: 'nao', label: 'Inativo (sem acesso)' }] },
+      { name: 'senha', label: reg ? 'Nova senha' : 'Senha inicial', type: 'password', required: !reg, full: true, hint: reg ? 'Deixe em branco para manter a senha atual. Mínimo de 6 caracteres.' : 'Mínimo de 6 caracteres. Informe esta senha ao usuário.' }
     ],
     toForm: r => ({ ...r, senha: '', ativo: r.ativo ? 'sim' : 'nao' }),
     validate(v, id) {
-      const login = v.login.toLowerCase();
-      if (!/^[a-z0-9._-]{3,20}$/.test(login)) return 'Usuário de acesso: de 3 a 20 caracteres, só letras minúsculas, números, ponto, hífen ou sublinhado.';
-      if (DB.list('usuarios').some(u => u.id !== id && u.login === login)) return 'Já existe um usuário com este acesso.';
+      if (!id) {
+        const email = v.email.toLowerCase();
+        if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email)) return 'Informe um e-mail válido.';
+        if (DB.list('usuarios').some(u => u.email.toLowerCase() === email)) return 'Já existe um usuário com este e-mail.';
+      }
       if ((!id || v.senha) && v.senha.length < 6) return 'A senha deve ter no mínimo 6 caracteres.';
       const fica = v.perfil === 'administrador' && v.ativo === 'sim';
       if (id === sessao.id && !fica) return 'Você não pode desativar nem rebaixar o seu próprio usuário.';
       if (!fica && !DB.list('usuarios').some(u => u.id !== id && u.perfil === 'administrador' && u.ativo)) return 'Mantenha ao menos um administrador ativo.';
     },
-    normalize: v => ({ nome: v.nome, login: v.login.toLowerCase(), perfil: v.perfil, ativo: v.ativo === 'sim', senha: v.senha }),
+    normalize: v => ({ nome: v.nome, email: v.email.toLowerCase(), perfil: v.perfil, ativo: v.ativo === 'sim', senha: v.senha }),
     salvar: (id, d) => DB.salvarUsuario(id, d)
   }
 };
@@ -312,15 +720,17 @@ function abrirEntidade(t, id) {
   const reg = id ? DB.get(t, id) : null;
   openForm({
     title: reg ? cfg.titulos.editar : cfg.titulos.novo,
-    fields: cfg.fields,
+    fields: cfg.campos ? cfg.campos(reg) : cfg.fields,
     values: reg ? (cfg.toForm ? cfg.toForm(reg) : reg) : {},
-    onSave(v) {
+    async onSave(v) {
       const err = cfg.validate(v, id);
       if (err) return err;
       const dados = cfg.normalize(v);
-      if (cfg.salvar) cfg.salvar(id, dados);
-      else if (id) DB.update(t, id, dados);
-      else DB.insert(t, { ...(cfg.defaults || {}), ...dados });
+      let r;
+      if (cfg.salvar) r = await cfg.salvar(id, dados);
+      else if (id) r = await DB.update(t, id, dados);
+      else r = await DB.insert(t, { ...(cfg.defaults || {}), ...dados });
+      if (!r.ok) return r.erro;
       toast(cfg.titulos.ok);
       route();
     }
@@ -477,11 +887,11 @@ function tPecas(q) {
 }
 
 function tUsuarios(q) {
-  const rows = DB.list('usuarios').filter(u => casa(q, u.nome, u.login, perfilLabel(u.perfil))).sort((a, b) => a.nome.localeCompare(b.nome, 'pt-BR'));
+  const rows = DB.list('usuarios').filter(u => casa(q, u.nome, u.email, perfilLabel(u.perfil))).sort((a, b) => a.nome.localeCompare(b.nome, 'pt-BR'));
   if (!rows.length) return vazio('Nenhum usuário encontrado para essa busca.');
-  return tabela([th('Nome'), th('Usuário'), th('Perfil'), th('Situação'), thAcoes], rows.map(u =>
-    `<tr><td><strong>${esc(u.nome)}</strong>${u.id === sessao.id ? ' <span class="muted">(você)</span>' : ''}</td><td>${esc(u.login)}</td><td>${esc(perfilLabel(u.perfil))}</td><td>${u.ativo ? '<span class="tag ok">Ativo</span>' : '<span class="tag zero">Inativo</span>'}</td>
-    <td class="end row-actions"><button class="link" data-act="editar" data-t="usuarios" data-id="${u.id}">Editar</button>${u.id === sessao.id ? '' : `<button class="link danger" data-act="excluir" data-t="usuarios" data-id="${u.id}">Excluir</button>`}</td></tr>`));
+  return tabela([th('Nome'), th('E-mail'), th('Perfil'), th('Situação'), thAcoes], rows.map(u =>
+    `<tr><td><strong>${esc(u.nome)}</strong>${u.id === sessao.id ? ' <span class="muted">(você)</span>' : ''}</td><td>${esc(u.email)}</td><td>${esc(perfilLabel(u.perfil))}</td><td>${u.ativo ? '<span class="tag ok">Ativo</span>' : '<span class="tag zero">Inativo</span>'}</td>
+    <td class="end row-actions"><button class="link" data-act="editar" data-t="usuarios" data-id="${u.id}">Editar</button></td></tr>`));
 }
 
 let filtroOS = 'todas';
@@ -575,8 +985,7 @@ function viewOS(id) {
   const garantiaAte = o.data_conclusao && Number(o.garantia_dias) > 0 ? DB.addDays(o.data_conclusao, Number(o.garantia_dias)) : null;
   const aviso = cancelada ? '<p class="lock no-print">Esta OS foi cancelada e está bloqueada. Reabra a OS para editar.</p>'
     : trava ? '<p class="lock no-print">Itens bloqueados porque a OS foi concluída. Volte o status para "Em andamento" se precisar alterá-los.</p>' : '';
-  const mecanicos = DB.list('usuarios').filter(u => u.perfil === 'mecanico' && u.ativo).map(u => u.nome);
-  if (o.mecanico && !mecanicos.includes(o.mecanico)) mecanicos.push(o.mecanico);
+  const mecanicos = DB.list('usuarios').filter(u => u.perfil === 'mecanico' && (u.ativo || u.id === o.mecanico_id));
   const sub = `Aberta em ${fdatahora(o.data_abertura, o.hora_abertura)}${o.aberta_por ? ` por ${esc(o.aberta_por)}` : ''}${o.data_conclusao ? `. Concluída em ${fdatahora(o.data_conclusao, o.hora_conclusao)}` : ''}.`;
   const campoOS = (campo, extra = '') => `data-os-field="${campo}" data-t="ordens" data-id="${o.id}"${extra}`;
 
@@ -599,7 +1008,7 @@ function viewOS(id) {
     </div>
     <div class="ticket-fields">
       <div class="field col-2"><label for="o_defeito">Problema relatado</label><textarea id="o_defeito" rows="2" ${campoOS('defeito_relatado')}>${esc(o.defeito_relatado)}</textarea></div>
-      <div class="field"><label for="o_mec">Mecânico responsável</label><select id="o_mec" ${campoOS('mecanico', P.atribuir ? '' : ' disabled')}><option value="">Sem responsável</option>${mecanicos.map(m => `<option value="${esc(m)}"${m === o.mecanico ? ' selected' : ''}>${esc(m)}</option>`).join('')}</select></div>
+      <div class="field"><label for="o_mec">Mecânico responsável</label><select id="o_mec" ${campoOS('mecanico_id', P.atribuir ? '' : ' disabled')}><option value="">Sem responsável</option>${mecanicos.map(m => `<option value="${esc(m.id)}"${m.id === o.mecanico_id ? ' selected' : ''}>${esc(m.nome)}</option>`).join('')}</select></div>
       <div class="field"><label for="o_prev">Previsão de entrega</label><input id="o_prev" type="date" value="${esc(o.previsao_entrega)}" ${campoOS('previsao_entrega', P.atribuir && !trava ? '' : ' disabled')}></div>
       <div class="field"><label for="o_gar">Garantia (dias)</label><input id="o_gar" type="number" min="0" value="${Number(o.garantia_dias)}" ${campoOS('garantia_dias')}>${garantiaAte ? `<small>Garantia até ${fdate(garantiaAte)}.</small>` : ''}</div>
       <div class="field"><label for="o_obs">Observações</label><textarea id="o_obs" rows="2" ${campoOS('observacoes')}>${esc(o.observacoes)}</textarea></div>
@@ -680,7 +1089,7 @@ const VIEWS = {
   veiculos: arg => (arg ? viewVeiculo(Number(arg)) : lista({ pagina: 'veiculos', titulo: 'Veículos', sub: 'Frota cadastrada, com o proprietário de cada veículo.', botao: btnNovo('veiculos', 'Novo veículo'), placeholder: 'Buscar por placa, modelo, chassi ou proprietário', fn: tVeiculos })),
   servicos: () => lista({ pagina: 'servicos', titulo: 'Serviços', sub: 'Tabela de mão de obra com categoria e valor padrão de cada serviço.', botao: btnNovo('servicos', 'Novo serviço'), placeholder: 'Buscar serviço ou categoria', fn: tServicos }),
   pecas: () => lista({ pagina: 'pecas', titulo: 'Peças', sub: 'Peças disponíveis na oficina. As indisponíveis podem ser encomendadas na ordem de serviço.', botao: btnNovo('pecas', 'Nova peça'), placeholder: 'Buscar por código ou descrição', fn: tPecas }),
-  usuarios: () => lista({ pagina: 'usuarios', titulo: 'Usuários', sub: 'Quem pode acessar o sistema e com qual perfil.', botao: btnNovo('usuarios', 'Novo usuário'), placeholder: 'Buscar por nome, usuário ou perfil', fn: tUsuarios })
+  usuarios: () => lista({ pagina: 'usuarios', titulo: 'Usuários', sub: 'Quem pode acessar o sistema e com qual perfil. Para tirar o acesso de alguém, edite e marque como inativo.', botao: btnNovo('usuarios', 'Novo usuário'), placeholder: 'Buscar por nome, e-mail ou perfil', fn: tUsuarios })
 };
 
 const TITULOS = { painel: 'Painel', os: 'Ordens de serviço', orcamentos: 'Orçamentos', clientes: 'Clientes', veiculos: 'Veículos', servicos: 'Serviços', pecas: 'Peças', usuarios: 'Usuários' };
@@ -715,7 +1124,7 @@ const aoMudarCliente = (f, e) => {
   if (e.target.name === 'cliente_id') f.elements.veiculo_id.innerHTML = optsHtml(veiculosOpts(e.target.value), '', 'Selecione o veículo');
 };
 const veiculoDoCliente = v => { const x = DB.get('veiculos', v.veiculo_id); return x && x.cliente_id === Number(v.cliente_id); };
-const mecanicoOpts = () => DB.list('usuarios').filter(u => u.perfil === 'mecanico' && u.ativo).map(u => ({ value: u.nome, label: u.nome }));
+const mecanicoOpts = () => DB.list('usuarios').filter(u => u.perfil === 'mecanico' && u.ativo).map(u => ({ value: u.id, label: u.nome }));
 
 function novaOS(pre = {}) {
   if (!perm().novaOS) return toast('Seu perfil não pode abrir ordens de serviço.', true);
@@ -727,15 +1136,16 @@ function novaOS(pre = {}) {
     fields: [
       ...camposClienteVeiculo(pre),
       { name: 'defeito_relatado', label: 'Problema relatado pelo cliente', type: 'textarea', required: true, full: true },
-      { name: 'mecanico', label: 'Mecânico responsável', type: 'select', placeholder: 'Definir depois', options: mecanicoOpts },
+      { name: 'mecanico_id', label: 'Mecânico responsável', type: 'select', placeholder: 'Definir depois', options: mecanicoOpts },
       { name: 'previsao_entrega', label: 'Previsão de entrega', type: 'date', required: true }
     ],
     onChange: aoMudarCliente,
-    onSave(v) {
+    async onSave(v) {
       if (!veiculoDoCliente(v)) return 'O veículo escolhido não pertence a este cliente.';
       if (v.previsao_entrega < DB.today()) return 'A previsão de entrega não pode ser anterior a hoje.';
-      const o = DB.novaOS({ cliente_id: Number(v.cliente_id), veiculo_id: Number(v.veiculo_id), defeito_relatado: v.defeito_relatado, mecanico: v.mecanico, previsao_entrega: v.previsao_entrega, aberta_por: sessao.nome });
-      location.hash = '#/os/' + o.id;
+      const r = await DB.novaOS({ cliente_id: Number(v.cliente_id), veiculo_id: Number(v.veiculo_id), defeito_relatado: v.defeito_relatado, mecanico_id: v.mecanico_id || null, previsao_entrega: v.previsao_entrega });
+      if (!r.ok) return r.erro;
+      location.hash = '#/os/' + r.os.id;
       toast('Ordem de serviço aberta.');
     }
   });
@@ -754,11 +1164,12 @@ function novoOrcamento() {
       { name: 'prazo_dias', label: 'Prazo de execução (dias)', type: 'number', min: 1, required: true }
     ],
     onChange: aoMudarCliente,
-    onSave(v) {
+    async onSave(v) {
       if (!veiculoDoCliente(v)) return 'O veículo escolhido não pertence a este cliente.';
       if (!inteiro(v.validade_dias) || Number(v.validade_dias) < 1 || !inteiro(v.prazo_dias) || Number(v.prazo_dias) < 1) return 'Validade e prazo devem ser números inteiros a partir de 1.';
-      const o = DB.novoOrcamento({ cliente_id: Number(v.cliente_id), veiculo_id: Number(v.veiculo_id), descricao: v.descricao, validade_dias: Number(v.validade_dias), prazo_dias: Number(v.prazo_dias), criado_por: sessao.nome });
-      location.hash = '#/orcamentos/' + o.id;
+      const r = await DB.novoOrcamento({ cliente_id: Number(v.cliente_id), veiculo_id: Number(v.veiculo_id), descricao: v.descricao, validade_dias: Number(v.validade_dias), prazo_dias: Number(v.prazo_dias) });
+      if (!r.ok) return r.erro;
+      location.hash = '#/orcamentos/' + r.orcamento.id;
       toast('Orçamento criado.');
     }
   });
@@ -779,12 +1190,12 @@ function addServico(t, id) {
       const s = DB.get('servicos', e.target.value);
       if (s) { f.elements.descricao.value = s.descricao; f.elements.valor.value = s.valor_padrao; }
     },
-    onSave(v) {
+    async onSave(v) {
       const cat = DB.get('servicos', v.servico_id);
       const dados = perm().valores ? { descricao: v.descricao, valor: v.valor } : (cat ? { descricao: cat.descricao, valor: cat.valor_padrao } : null);
       if (!dados) return 'Escolha um serviço da tabela de mão de obra.';
       if (isNaN(Number(dados.valor)) || Number(dados.valor) < 0) return 'Informe um valor igual ou maior que zero.';
-      const r = DB.addServico(t, id, dados);
+      const r = await DB.addServico(t, id, { ...dados, servico_id: cat ? cat.id : null });
       if (!r.ok) return r.erro;
       route();
     }
@@ -802,8 +1213,8 @@ function addPeca(t, id) {
     title: 'Adicionar peça',
     submitLabel: 'Adicionar',
     fields,
-    onSave(v) {
-      const r = DB.addPeca(t, id, v.peca_id, v.quantidade, v.encomendar === 'sim');
+    async onSave(v) {
+      const r = await DB.addPeca(t, id, v.peca_id, v.quantidade, v.encomendar === 'sim');
       if (!r.ok) return r.erro;
       route();
     }
@@ -812,26 +1223,25 @@ function addPeca(t, id) {
 
 /* ---------- Eventos ---------- */
 let tituloAntes = null;
+
+/* Depois de gravar: mostra o resultado e redesenha a tela com os dados novos */
+const resultado = (r, ok) => { if (r.ok) { if (ok) toast(ok); } else toast(r.erro, true); route(); return r; };
+
 const actions = {
   fechar: () => closeModal(),
   sair: () => sair(),
   novo: d => abrirEntidade(d.t, null),
-  editar: d => abrirEntidade(d.t, Number(d.id)),
-  excluir(d) {
-    if (!pode(d.t)) return toast('Seu perfil não pode excluir este cadastro.', true);
-    if (d.t === 'usuarios' && Number(d.id) === sessao.id) return toast('Você não pode excluir o seu próprio usuário.', true);
+  editar: d => abrirEntidade(d.t, idDe(d.t, d.id)),
+  async excluir(d) {
+    if (!pode(d.t) || d.t === 'usuarios') return toast('Seu perfil não pode excluir este cadastro.', true);
     if (!confirm('Excluir este registro? Essa ação não pode ser desfeita.')) return;
-    const r = DB.remove(d.t, Number(d.id));
-    if (!r.ok) return toast(r.erro, true);
-    toast('Registro excluído.');
-    route();
+    resultado(await DB.remove(d.t, Number(d.id)), 'Registro excluído.');
   },
-  'alternar-cliente'(d) {
+  async 'alternar-cliente'(d) {
     if (!pode('clientes')) return toast('Seu perfil não pode alterar este cadastro.', true);
     const c = DB.get('clientes', d.id);
-    DB.update('clientes', c.id, { ativo: !c.ativo });
-    toast(c.ativo ? 'Cliente inativado. Ele não aparece mais ao abrir OS e orçamentos.' : 'Cliente reativado.');
-    route();
+    const r = await DB.update('clientes', c.id, { ativo: !c.ativo });
+    resultado(r, c.ativo ? 'Cliente inativado. Ele não aparece mais ao abrir OS e orçamentos.' : 'Cliente reativado.');
   },
   'nova-os'(d) {
     if (d.cliente) {
@@ -842,33 +1252,31 @@ const actions = {
   },
   'novo-orcamento': () => novoOrcamento(),
   filtro(d) { filtroOS = d.s; route(); },
-  status(d) {
+  async status(d) {
     if (!perm().status.includes(d.status)) return toast('Seu perfil não pode marcar esta etapa.', true);
     if (d.status === 'cancelada' && !confirm('Cancelar esta ordem de serviço?')) return;
-    const r = DB.mudarStatus(Number(d.id), d.status);
-    if (!r.ok) toast(r.erro, true); else toast('Status atualizado.');
-    route();
+    resultado(await DB.mudarStatus(Number(d.id), d.status), 'Status atualizado.');
   },
-  'orc-status'(d) {
+  async 'orc-status'(d) {
     if (!perm().orcamentos) return toast('Seu perfil não pode alterar orçamentos.', true);
-    const r = DB.mudarStatusOrc(Number(d.id), d.status);
-    if (!r.ok) toast(r.erro, true); else toast('Situação do orçamento atualizada.');
-    route();
+    resultado(await DB.mudarStatusOrc(Number(d.id), d.status), 'Situação do orçamento atualizada.');
   },
-  'orc-converter'(d) {
+  async 'orc-converter'(d) {
     if (!perm().orcamentos || !perm().novaOS) return toast('Seu perfil não pode converter orçamentos.', true);
-    const r = DB.converterOrcamento(Number(d.id), sessao.nome);
+    const r = await DB.converterOrcamento(Number(d.id));
     if (!r.ok) return toast(r.erro, true);
     location.hash = '#/os/' + r.os.id;
     toast(r.os.status === 'aguardando_peca' ? 'Orçamento convertido. Há peça indisponível: ela foi lançada como encomenda.' : 'Orçamento convertido em ordem de serviço.');
+    route();
   },
-  'orc-excluir'(d) {
+  async 'orc-excluir'(d) {
     if (!perm().orcamentos) return toast('Seu perfil não pode excluir orçamentos.', true);
     if (!confirm('Excluir este orçamento? Essa ação não pode ser desfeita.')) return;
-    const r = DB.remove('orcamentos', Number(d.id));
+    const r = await DB.remove('orcamentos', Number(d.id));
     if (!r.ok) return toast(r.erro, true);
     toast('Orçamento excluído.');
     location.hash = '#/orcamentos';
+    route();
   },
   /* No diálogo de impressão do navegador, escolha "Salvar como PDF". O título vira o nome do arquivo. */
   imprimir(d) {
@@ -886,74 +1294,75 @@ const actions = {
         { name: 'forma', label: 'Forma de pagamento', type: 'select', required: true, options: DB.FORMAS_PAGAMENTO.map(f => ({ value: f, label: f })) },
         { name: 'pago_em', label: 'Data do pagamento', type: 'date', required: true }
       ],
-      onSave(v) {
-        const r = DB.registrarPagamento(Number(d.id), v.forma, v.pago_em);
+      async onSave(v) {
+        const r = await DB.registrarPagamento(Number(d.id), v.forma, v.pago_em);
         if (!r.ok) return r.erro;
         toast('Pagamento registrado.');
         route();
       }
     });
   },
-  estornar(d) {
+  async estornar(d) {
     if (!perm().receber) return toast('Seu perfil não pode estornar pagamentos.', true);
     if (!confirm('Estornar o pagamento desta OS?')) return;
-    DB.estornarPagamento(Number(d.id));
-    toast('Pagamento estornado.');
-    route();
+    resultado(await DB.estornarPagamento(Number(d.id)), 'Pagamento estornado.');
   },
-  receber(d) {
-    const r = DB.receberPeca(Number(d.id), d.item);
-    if (!r.ok) toast(r.erro, true); else toast('Chegada da peça registrada.');
-    route();
+  async receber(d) {
+    resultado(await DB.receberPeca(Number(d.id), Number(d.item)), 'Chegada da peça registrada.');
   },
-  'os-excluir'(d) {
+  async 'os-excluir'(d) {
     if (!perm().excluirOS) return toast('Seu perfil não pode excluir ordens de serviço.', true);
     if (!confirm('Excluir esta ordem de serviço? Essa ação não pode ser desfeita.')) return;
-    const r = DB.remove('ordens', Number(d.id));
+    const r = await DB.remove('ordens', Number(d.id));
     if (!r.ok) return toast(r.erro, true);
     toast('Ordem de serviço excluída.');
     location.hash = '#/os';
+    route();
   },
   'add-servico': d => addServico(d.t || 'ordens', Number(d.id)),
   'add-peca': d => addPeca(d.t || 'ordens', Number(d.id)),
-  'rm-item'(d) {
-    const r = DB.removeItem(d.t || 'ordens', Number(d.id), d.kind, d.item);
-    if (!r.ok) toast(r.erro, true);
-    route();
-  },
-  restaurar() {
-    if (!perm().restaurar) return toast('Apenas o administrador pode restaurar os dados.', true);
-    if (!confirm('Apagar todos os dados (inclusive usuários) e restaurar os dados de exemplo? Você precisará entrar de novo.')) return;
-    DB.reset();
-    sair();
+  async 'rm-item'(d) {
+    resultado(await DB.removeItem(d.t || 'ordens', Number(d.id), d.kind, Number(d.item)));
   }
 };
+
+/* Executa uma ação sem permitir cliques repetidos enquanto ela grava no servidor */
+async function executar(fn) {
+  if (ocupado) return;
+  ocupado = true;
+  document.body.classList.add('ocupado');
+  try { await fn(); } catch (err) { toast('Algo deu errado. Tente novamente.', true); } finally {
+    ocupado = false;
+    document.body.classList.remove('ocupado');
+  }
+}
 
 document.addEventListener('click', e => {
   if (e.target.classList && e.target.classList.contains('overlay')) return closeModal();
   const el = e.target.closest('[data-act]');
-  if (el && actions[el.dataset.act]) actions[el.dataset.act](el.dataset, el, e);
+  if (el && actions[el.dataset.act]) executar(() => actions[el.dataset.act](el.dataset, el, e));
 });
 
 document.addEventListener('change', e => {
   const el = e.target;
   if (el.dataset.statusSelect) {
-    if (!perm().status.includes(el.value)) { toast('Seu perfil não pode marcar esta etapa.', true); route(); return; }
-    const r = DB.mudarStatus(Number(el.dataset.statusSelect), el.value);
-    if (!r.ok) toast(r.erro, true); else toast('Status atualizado.');
-    route();
+    executar(async () => {
+      if (!perm().status.includes(el.value)) { toast('Seu perfil não pode marcar esta etapa.', true); route(); return; }
+      resultado(await DB.mudarStatus(Number(el.dataset.statusSelect), el.value), 'Status atualizado.');
+    });
   } else if (el.dataset.periodo !== undefined) {
     periodoMeses = Number(el.value) || 1;
     route();
   } else if (el.dataset.osField) {
-    const campo = el.dataset.osField, t = el.dataset.t || 'ordens';
-    if (t === 'ordens' && ((campo === 'desconto' && !perm().desconto) || ((campo === 'mecanico' || campo === 'previsao_entrega') && !perm().atribuir))) { toast('Seu perfil não pode alterar este campo.', true); route(); return; }
-    if (t === 'orcamentos' && !perm().orcamentos) { toast('Seu perfil não pode alterar orçamentos.', true); route(); return; }
-    let valor = el.value;
-    if (['garantia_dias', 'desconto'].includes(campo)) valor = Math.max(0, Number(valor) || 0);
-    if (['validade_dias', 'prazo_dias'].includes(campo)) valor = Math.max(1, Math.floor(Number(valor)) || 1);
-    DB.update(t, Number(el.dataset.id), { [campo]: valor });
-    route();
+    executar(async () => {
+      const campo = el.dataset.osField, t = el.dataset.t || 'ordens';
+      if (t === 'ordens' && ((campo === 'desconto' && !perm().desconto) || ((campo === 'mecanico_id' || campo === 'previsao_entrega') && !perm().atribuir))) { toast('Seu perfil não pode alterar este campo.', true); route(); return; }
+      if (t === 'orcamentos' && !perm().orcamentos) { toast('Seu perfil não pode alterar orçamentos.', true); route(); return; }
+      let valor = el.value;
+      if (['garantia_dias', 'desconto'].includes(campo)) valor = Math.max(0, Number(valor) || 0);
+      if (['validade_dias', 'prazo_dias'].includes(campo)) valor = Math.max(1, Math.floor(Number(valor)) || 1);
+      resultado(await DB.update(t, Number(el.dataset.id), { [campo]: valor }));
+    });
   }
 });
 
@@ -968,24 +1377,44 @@ document.addEventListener('keydown', e => { if (e.key === 'Escape' && $('#modal-
 window.addEventListener('afterprint', () => { if (tituloAntes) { document.title = tituloAntes; tituloAntes = null; } });
 window.addEventListener('hashchange', () => { if (sessao) route(); });
 
-/* Mantém várias abas do mesmo navegador em sincronia (demonstra a atualização do painel entre terminais). */
-window.addEventListener('storage', e => {
-  if (e.key !== DB.KEY || !sessao) return;
-  DB.reload();
-  const atual = lerSessao();
-  if (!atual) return sair('Seu acesso foi alterado por um administrador. Entre novamente.');
-  sessao = atual;
-  atualizarMenu();
-  if (!$('#modal-root .overlay')) route();
-});
+/* Tempo real: quando alguém altera algo em qualquer computador, o banco avisa e a tela se atualiza.
+   Os avisos que chegam juntos viram uma única atualização. */
+let atualizando = null;
+function aoMudarDados() {
+  clearTimeout(atualizando);
+  atualizando = setTimeout(async () => {
+    if (!sessao || ocupado) { if (sessao) aoMudarDados(); return; }
+    try { await DB.carregar(); } catch (e) { return; }
+    const eu = DB.get('usuarios', sessao.id);
+    if (!eu || !eu.ativo) return sair('Seu acesso foi alterado por um administrador. Entre novamente.');
+    if (eu.perfil !== sessao.perfil || eu.nome !== sessao.nome) { sessao = { ...sessao, perfil: eu.perfil, nome: eu.nome }; atualizarMenu(); }
+    if (!$('#modal-root .overlay')) route();
+  }, 300);
+}
 
-function iniciar() {
-  sessao = lerSessao();
-  if (!sessao) return telaLogin();
+async function entrarNoSistema() {
+  telaCarregando('Carregando dados…');
+  try {
+    await DB.carregar();
+  } catch (e) {
+    await DB.sair();
+    sessao = null;
+    return telaLogin('Não foi possível carregar os dados. Verifique a conexão e entre novamente.');
+  }
   $('#login-root').innerHTML = '';
   document.querySelector('.shell').hidden = false;
   atualizarMenu();
   reiniciarInatividade();
+  DB.assinar(aoMudarDados);
   route();
+}
+
+async function iniciar() {
+  if (!DB.configurado) return telaConfiguracao();
+  telaCarregando();
+  const r = await DB.sessaoDoSupabase();
+  if (!r.ok) return telaLogin(r.erro || '');
+  sessao = r.sessao;
+  await entrarNoSistema();
 }
 iniciar();

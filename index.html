@@ -8,7 +8,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=Public+Sans:wght@400;500;600&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="css/style.css">
+  <link rel="stylesheet" href="style.css">
 </head>
 <body>
   <a class="skip" href="#view">Ir para o conteúdo</a>
@@ -30,8 +30,7 @@
       </nav>
       <div class="side-foot">
         <div id="user-box" class="user-box"></div>
-        <p>Protótipo acadêmico. Os dados ficam salvos neste navegador.</p>
-        <button type="button" id="btn-restaurar" class="link-light" data-act="restaurar">Restaurar dados de exemplo</button>
+        <p>Protótipo acadêmico.</p>
       </div>
     </aside>
     <main id="view" class="main" tabindex="-1"></main>
@@ -39,7 +38,7 @@
   <div id="login-root"></div>
   <div id="modal-root"></div>
   <div id="toast" role="status" aria-live="polite"></div>
-  <script src="js/db.js"></script>
-  <script src="js/app.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
+  <script src="app.js"></script>
 </body>
 </html>

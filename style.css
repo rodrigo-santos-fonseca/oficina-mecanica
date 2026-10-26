@@ -147,7 +147,7 @@ tbody tr:hover { background: #f7f9fa; }
 .stepper button.current { background: var(--ink); color: #fff; font-weight: 600; box-shadow: inset 0 -4px 0 var(--signal); }
 .ticket { background: var(--paper); border: 1px solid var(--line); border-radius: var(--radius); padding: 24px 28px 28px; }
 .ticket-id { display: flex; gap: 28px; align-items: center; flex-wrap: wrap; padding-bottom: 20px; border-bottom: 2px dashed var(--line); margin-bottom: 20px; }
-.facts { margin: 0; display: grid; grid-template-columns: repeat(2, minmax(160px, 1fr)); gap: 10px 32px; flex: 1; }
+.facts { margin: 0; display: grid; grid-template-columns: repeat(2, minmax(160px, 1fr)); gap: 10px 32px; flex: 1 1 260px; }
 .facts dt { color: var(--muted); font-size: 13px; }
 .facts dd { margin: 0; font-weight: 500; }
 .ticket-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 14px 20px; }
@@ -197,6 +197,9 @@ tbody tr:hover { background: #f7f9fa; }
   .strip > div { padding: 12px 14px; min-width: 0; }
   .strip dd { font-size: clamp(16px, 4.8vw, 22px); overflow-wrap: anywhere; }
   .ticket { padding: 18px; }
+  .facts { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 16px; }
+  .facts dd { overflow-wrap: anywhere; }
+  .plate.lg b { font-size: 34px; padding: 5px 12px 3px; }
   .ticket-fields, .modal .grid { grid-template-columns: 1fr; }
   .stepper { flex-wrap: wrap; }
   .stepper li { flex: 1 1 33%; }
@@ -255,3 +258,10 @@ tr.inativo td { color: var(--muted); }
 .pagamento p { margin-bottom: 4px; }
 .secao { margin: 28px 0 10px; }
 .dica { margin: -8px 0 14px; }
+
+/* Carregamento, configuração e bloqueio de cliques durante gravações */
+.carregando { color: #fff; font-size: 16px; }
+body.ocupado { cursor: progress; }
+body.ocupado button, body.ocupado a.btn { pointer-events: none; opacity: .75; }
+.login-card code { background: #eef1f3; padding: 1px 5px; border-radius: 4px; font-size: 13px; }
+.login-card p { margin: 0; }
